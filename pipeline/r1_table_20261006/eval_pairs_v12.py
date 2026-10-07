@@ -150,6 +150,9 @@ def main():
         for j, txt in zip(sel, txts):
             d = rows[j]
             m = d["messages"]
+            # ★grp 必须在这里算: 下面的分层(STRAT)、照抄诊断(COPY)、按轮(sg) 三处都要用它。
+            #   原先它写在循环末尾的 w.write 之前 ⇒ UnboundLocalError, 冒烟测试当场抓到。
+            grp = [k for k, v in groups.items() if d["parent_id"] in v] or ["(未分组)"]
             gold = {p["position_1based"]: p["aa"]
                     for p in json.loads(m[2]["content"])["picks"]}
             user = json.loads(m[1]["content"])
@@ -229,7 +232,6 @@ def main():
             # ★v12 多存: 原版只存计数, 事后想复算"输出残基组成"却没数据可用。
             #   另外 gold 现在是【本档 ∩ 表】, 所以要同时记 n_band 才能分清
             #   "表里能拿到的" 和 "整档" 两个分母。
-            grp = [k for k, v in groups.items() if d["parent_id"] in v] or ["(未分组)"]
             w.write(json.dumps({"parent_id": d["parent_id"], "round_id": d["round_id"],
                                 "group": grp[0], "n_cand": len(cand),
                                 "n_oob": len(_oob), "oob_pos": _oob[:10],
