@@ -1,0 +1,16 @@
+{
+  "ready": true,
+  "utc": "2026-10-02T05:02:30Z",
+  "code_sha256": {
+    "continue_eval.py": "5b4ed3999971d51f54f0ee70ee08eab9d02ba8b28d94092b9fc658ab732cb64b",
+    "score_clean_shard.py": "b5bdf8666f6567cdd2a217b3c30fdf3b3e34413b3b1edb891fc80f274d2279d0",
+    "dplm2bit_textcond_hybrid.py": "7a6c625994f206f0bb71405687e249c1a87b94ef64edf5cbf803b6a18334669d"
+  },
+  "sample_count": 2801,
+  "arms": [
+    "predicted_positions",
+    "reference_positions"
+  ],
+  "private_token_caches": true,
+  "scoring": "CLEAN EC1-4; no refolding in this pipeline"
+}

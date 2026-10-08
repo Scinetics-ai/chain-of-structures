@@ -2,9 +2,13 @@
 
 Code for *Chain of Structures: Connecting Reasoning and Generation for Protein Design*.
 
-A language reasoning expert writes a design record over four rounds: catalytic core,
-active site, global backbone, then complete sequence and structure. Each written round
-re-conditions an all-atom generator, whose output becomes the next round's context.
+A language reasoning expert writes a design record over four rounds: catalytic core, active
+site, global backbone, then complete sequence and structure. Each written round re-conditions
+an all-atom generator, whose output becomes the next round's context.
+
+This repository holds the four-stage injection arm end to end, which is the arm the paper
+reports and the arm whose weights are released. Everything here ran on our own cluster, and the
+absolute paths are left in place so that each script still says exactly what it read.
 
 - **Weights:** [`Scinetics-ai/chain-of-structures`](https://huggingface.co/Scinetics-ai/chain-of-structures)
   on the Hugging Face Hub. `chain_of_structures.pt` is a delta checkpoint carrying the trained
@@ -12,44 +16,73 @@ re-conditions an all-atom generator, whose output becomes the next round's conte
   the reasoner, 7.4M heads, 3.3M ground, 0.7M embeddings. Both base models are mirrored there
   unmodified under `base/`, with their own licences.
 
-## What is here
+## The model
 
-The data-construction and training pipeline for the reasoning expert, as it ran on our cluster.
-Directories are dated by run, and the `v11` and `v12` suffixes mark successive iterations of the
-candidate-shortlist format. The paper's section *Four-Round Data and Supervision* describes the
-corpus and the supervision that these scripts build.
+`model/dplm2bit_textcond_hybrid.py` is the whole thing: the conditioned generator, the staged
+trainer, and the multi-round sampler. The generator is DPLM-2-bit 650M and the reasoner is
+Qwen3.5-9B under a rank-32 LoRA.
 
-| Path | What it does |
+Text reaches the generator at **each of the last eight layers** rather than at a single entry
+point (`--use_deep_per_token_cross --deep_cross_layers 8`), and the written residue identities
+reach it as a separate discrete channel through a gated injector (`--ground_mode gated`). The
+released run has that discrete channel open at **all four** rounds. Earlier runs had it only at
+rounds two and three, because the round-four and round-five documents named no residue at all,
+so the extractor returned zero pairs there and the injector was a no-op. `data/patch_text_v2.py`
+and `data/shells_v1.py` are what gave those two rounds something to name.
+
+## Layout
+
+| Path | What it is |
 |---|---|
-| `pipeline/r1_table_20261006/build_r1_table.py` | Builds a round's candidate shortlist. Every column is looked up from same-EC3 training enzymes or corpus priors; none is measured on the target. |
-| `pipeline/r1_table_20261006/make_splits_v12.py` | Three-way split with the two properties asserted on the written files: `val_overlap` reactions all appear in train, `val_strict` reactions are disjoint from it. |
-| `pipeline/r1_table_20261006/build_r1_requests_v12.py` | The teacher prompt. One candidate per line; justifications must argue chemistry and may not transcribe column values. |
-| `pipeline/r1_table_20261006/assemble_sft_v12.py` | The four gates: picks in the shortlist, no out-of-table numbers, no recitation, residue distribution over the *selected* positions. |
-| `pipeline/r1_table_20261006/merge_split_v12.py` | Eight hard assertions over the merged corpus, including split disjointness after back-fill. |
-| `pipeline/r1_table_20261006/train_sft_v12.py` | LoRA SFT. Evaluates and reports the two validation sets separately; they are never averaged. |
-| `pipeline/r1_table_20261006/lookup_only_baseline.py` | The lookup-only bar the reasoner has to beat. |
-| `pipeline/r1_table_20261006/table_info_ceiling.py` | Fits a gradient-boosted classifier on the shortlist columns to measure what is left in them. |
-| `pipeline/r1_table_20261006/eval_pairs_v12.py` | Offline pair evaluation, stratified by template distance. |
-| `pipeline/teacher/` | Teacher serving and dispatch. |
-| `pipeline/cvm_sglang_20261003/` | SGLang replica management for teacher generation. |
-| `pipeline/r1_info_gate_20261006/` | Per-channel measurement of what each candidate information source is worth. |
-| `pipeline/r1_regime_gate_20261005/` | Whether a round's draft is informative enough to reason over. |
-| `pipeline/metrics_deep4b_20261006/` | Structure decoding and the EC, F1 and MMD metrics. |
-| `pipeline/train_v11_20261006/` | The preceding training iteration, kept for comparison. |
-| `pipeline/lthpc/` | Protocol-run preparation, auditing and release hashing. |
+| `model/dplm2bit_textcond_hybrid.py` | Model, staged trainer, multi-round sampler. |
+| `train/run_deep2like.sh` | The recipe. Its header lists, flag by flag, what is shared with the two-stage run and the three things that differ. |
+| `train/run_stage_2node.sh` | The two-node, sixteen-GPU harness, including why `NCCL_IB_DISABLE=1` is mandatory on these boxes. |
+| `train/wait_and_launch_A.sh` | Verifies the cards really are empty before launching. A refused or duplicated launch still fires. |
+| `train/after_stageA.sh` | Lets the writer write, parses it, and fits the per-round noise profile. |
+| `data/patch_text_v2.py` | Gives rounds four and five a residue-naming sentence, writing beside the originals so the two-stage arm stays bit-identical. |
+| `data/shells_v1.py` | The two new position layers behind those sentences, from the same CIF and the same heavy-atom minimum. |
+| `data/build_pairs_v2.py` | The discrete channel's pair table, with two guards the earlier builder did not need while rounds four and five were always empty. |
+| `data/build_docs_v2.py` | Tokenised five-round documents. The original builder was not kept, so its conventions were recovered and reproduced on 20 of 20 records first. |
+| `data/stage_means_v2.py` | Per-round hidden-state means. Not optional: the mean is subtracted before the states reach the conditioner, and the new text moves it. |
+| `data/refit_noise_v2.py` | Fits the writer's measured reliability per round. A round with pairs but no profile would be injected as an oracle with no error raised. |
+| `data/build_text_hash_cache.py`, `data/wire_hash_cache.sh` | Precomputes the text hash table. Without it every rank spends seventeen minutes at startup. |
+| `data/run_build.sh` | The whole build in order, stopping at the first step whose own assertion fails. |
+| `generate/gen_cot_docs_v2.py` | The writer writes the four rounds. Asserts the LoRA keys, shapes and values after loading. |
+| `generate/gen_d2like.sh` | End-to-end generation from the released checkpoint, sixteen shards balanced by length rather than by count. |
+| `generate/launch_writer.sh`, `generate/eval_worker.py`, `generate/continue_eval.py` | Per-shard dispatch, with a refusal on a shard that already has a status file. |
+| `generate/generation_ready.json` | The pre-generation record: sample count, arms, and the sha256 of each script that ran. |
+| `score/band_final.py` | The EC criterion. |
+| `score/clean_d2like.sh`, `score/score_clean_shard.py` | EC1 to EC4 through CLEAN, per shard. |
+| `score/eval_f1_ec.py` | Micro and macro F1 in the official baseline's own terms, which is the ruler that reproduced their published numbers to within 0.003. |
+| `score/eval_mmd.py` | MMD on k-mer spectra, reported at k = 1, 2, 3 rather than silently choosing one. |
+| `score/decode_struct_to_pdb.py`, `score/run_decode.sh` | Structure tokens to PDB for the self-consistency step, with a geometry gate: exit code zero is not evidence of a fold. |
+| `score/eval_direct_esmfold_consistency_local.py`, `score/run_esmfold.sh` | pLDDT, TM and scRMSD: the generated sequence is folded with ESMFold and compared against the generated structure. |
+| `score/watch_metrics.sh` | Samples the folding run cumulatively rather than per shard, so a part-finished shard cannot move the number. |
+| `score/diag_macf1.py` | Why macro F1 is low, by class support rather than by explanation. |
+| `score/evals.py`, `score/peek_d2like.py` | Training-curve readout and the checkpoint's component breakdown. |
 
-## Three things the format exists to prevent
+## What the released run actually was
 
-Each produced plausible-looking output while being wrong, and none raised an error.
+| | |
+|---|---|
+| Run | `q35_deep2like_4stage_16g`, sixteen GPUs across two nodes |
+| Checkpoint | `FINAL_d2like_step9000_val0.7807.pt`, step 9000, best validation 0.780707 |
+| Recipe | `train/run_deep2like.sh`, with `cond_lr` 6e-4 and `qwen_lr` 2e-4, the four-GPU values scaled by the square root of the sixteenfold batch |
+| `--ground_noise` | **not passed** |
 
-1. **A language model cannot index into a long digit string.** Packed onto one line, it
-   invents positions on an integer grid while appearing to cite the table. The shortlist is
-   printed one candidate per line, and out-of-table picks are measured as an acceptance gate.
-2. **Alphabetical key order puts the answer before the reasoning.** Serialising with sorted
-   keys places `picks` before `reasoning`. This affected 3,764 of 3,764 records in one batch.
-   Output serialisation never sorts keys.
-3. **A column the model cannot trust is worse than no column.** A shuffled tool report scored
-   1.23x random; *no* report scored 2.13x. Beyond the trust bucket the column is withheld.
+The last line matters, and it is checked rather than remembered. The trainer prints
+`[GROUND] pairs degraded per record` only when that flag is on
+(`model/dplm2bit_textcond_hybrid.py`, in the grounding setup), and that line does not appear in
+the run's log. Passing it costs the arm a great deal: training then corrupts the injected pairs
+to a reliability that is not the writer's own.
+
+**Two revisions of the trainer exist, and this is the later one.** Training ran a revision from
+30 September. The file here is the 2 October revision, whose sha256 is pinned in
+`generate/generation_ready.json` and which produced every reported generation. It differs in
+four places, all of them guards rather than behaviour: a per-index cache in `tokenize_pdbs`, a
+budget line in the multi-round sampler, `_qwen_hidden_size` moved above its use and taught to
+read `text_config` because Qwen3.5 is multimodal and puts the width there, and a key and shape
+assertion on the LoRA load.
 
 ## Reproducing
 
